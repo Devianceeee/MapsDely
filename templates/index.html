@@ -1,0 +1,1653 @@
+<!DOCTYPE html>
+<html lang="pl-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualizacao de Rotas</title>
+    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAYCmOPWp58Y4Q_XdOUzE8CrYi_l59vtes&libraries=geometry&v=3.58"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
+        import { getDatabase, get, ref, set, onValue } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-database.js";
+        import { fetchSignInMethodsForEmail } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyByfOtKgUd_n0tt1BF5sdm5LDB8YbjOKG4",
+            authDomain: "mapsdely.firebaseapp.com",
+            databaseURL: "https://mapsdely-default-rtdb.europe-west1.firebasedatabase.app",
+            projectId: "mapsdely",
+            storageBucket: "mapsdely.appspot.com",
+            messagingSenderId: "77683063005",
+            appId: "1:77683063005:web:18d333b5331476003b4334",
+            measurementId: "G-P3HDT7SXR8"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth();
+        const db = getDatabase(app);
+
+        let directionsRenderer;
+        let directionsService;
+        let map;
+        let geoWatchId = null;
+        let userLatLng = null;
+        let markers = [];
+        let userMarkers = {};
+        let followingUser = false;
+        let mapHeading = 0;
+        let autoCenterMap = false;
+        let autoZoom = false;
+        let userMarker = null;
+        let previousHeading = 0;
+        let initialCentered = false;
+        let isRecentering = true;
+        let smoothHeading = 0; 
+        let isManualZoom = false;
+        let currentPolyline = null;
+        
+
+        document.addEventListener("DOMContentLoaded", function() {
+            const startTripBtn = document.getElementById('startTripBtn'); 
+            initMap();
+            document.getElementById('startTripBtn').addEventListener('click', function(){
+                document.getElementById('infoPanel').style.display = 'block';});
+            const registerForm = document.getElementById('registerForm');
+            const loginForm = document.getElementById('loginForm');
+            const mapContainer = document.getElementById('mapContainer');
+            let selectedDestination = null;
+            let selectedMarker = null;
+            let userId = null;
+            let currentRoute = null;  // Для сохранения текущего маршрута
+            const deviationThreshold = 200;
+
+            const addressMarkers = [{"lat": 53.4285438, "lng": 14.5528116}, {"lat": 53.3460555, "lng": 15.5441912}, {"lat": 53.16928, "lng": 15.41971}, {"lat": 52.40567859999999, "lng": 16.9312766}, {"lat": 53.423364, "lng": 14.541054}];
+            const completedMarkers = new Set();
+
+            registerForm.addEventListener('submit', (e) => {
+                e.preventDefault();
+                const email = document.getElementById('registerEmail').value;
+                const password = document.getElementById('registerPassword').value;
+
+                createUserWithEmailAndPassword(auth, email, password)
+                    .then((userCredential) => {
+                        userId = userCredential.user.uid;
+
+                        // Default role is 'user'
+                        set(ref(db, 'users/' + userId), {
+                            email: email,
+                            role: 'user' // Default role
+                        });
+
+                        registerForm.style.display = 'none';
+                        mapContainer.style.display = 'block';
+                        initMap();
+                    })
+                    .catch((error) => {
+                        console.error('Error:', error.code, error.message);
+                    });
+            });
+
+            loginForm.addEventListener('submit', (e) => {
+                e.preventDefault();
+                const email = document.getElementById('loginEmail').value;
+                const password = document.getElementById('loginPassword').value;
+                signInWithEmailAndPassword(auth, email, password)
+                    .then((userCredential) => {
+                        userId = userCredential.user.uid;
+                        loginForm.style.display = 'none';
+                        mapContainer.style.display = 'block';
+                        initMap();
+                    })
+                    .catch((error) => {
+                        console.error('Erro ao fazer login:', error.code, error.message);
+                    });
+            });
+
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    userId = user.uid;
+
+                    const userRef = ref(db, 'users/' + userId);
+                    onValue(userRef, (snapshot) => {
+                        const userData = snapshot.val();
+                        if (!userData) {
+                            console.warn('User data not found. Setting default data...');
+                            set(userRef, {
+                                email: user.email,
+                                role: 'user'
+                            });
+                            return;
+                        }
+
+                        const role = userData.role || 'user';
+
+                        if (role === 'admin') {
+                            // Show admin-specific features
+                            console.log('Welcome, Admin!');
+                            // Example: Enable admin panel
+                            document.getElementById('adminPanel').style.display = 'block';
+                            document.getElementById('createAdminBtn').addEventListener('click', () => {
+                                const email = prompt('Enter the new admin\'s email:');
+                                const password = prompt('Enter the new admin\'s password:');
+                            });
+                            document.getElementById('statisticsDropdown').addEventListener('change', (event) => {
+                                const selectedUserId = event.target.value;
+                                if (selectedUserId !== 'default') {
+                                    const adminPanel = document.getElementById('adminPanel');
+                                if (adminPanel.style.display === 'none') {
+                                    console.error('Admin panel is not visible. Cannot display statistics.');
+                                    return;
+                                }
+                                    displayStatistics(selectedUserId);
+                                }
+                            });
+
+                            const turnInstructions = document.getElementById('turnInstructions');
+                            if (turnInstructions) {
+                                turnInstructions.style.display = 'none';
+                            }
+                        } else {
+                            console.log('Welcome, User!');
+                        }
+
+                        registerForm.style.display = 'none';
+                        loginForm.style.display = 'none';
+                        mapContainer.style.display = 'block';
+                        initMap();
+                        
+                    });
+                } else {
+                    mapContainer.style.display = 'none';
+                }
+            });
+
+            function createArrowIcon(heading) {
+                heading = heading || 0;
+                return {
+                    url: "https://img.icons8.com/?size=100&id=EpAkgVzCZCVV&format=png&color=000000", // Вставьте URL изображения стрелки
+                    scaledSize: new google.maps.Size(40, 40), // Увеличиваем размер стрелки
+                    rotation: heading, // Вращение стрелки на основе направления пользователя
+                    anchor: new google.maps.Point(30, 30) // Центрируем иконку
+                };
+            }
+            let lastRecalculateTime = 0;
+
+            function recalculateRouteIfNeeded(pos) {
+                const now = Date.now();
+                if (now - lastRecalculateTime < 5000) { // 5-second throttle
+                    return;
+                }
+                lastRecalculateTime = now;
+                if (!currentRoute) return;
+                directionsRenderer.setDirections({ routes: [] });
+
+                const leg = currentRoute.routes[0].legs[0];
+                const path = leg.steps.map(step => step.end_location);
+                
+                let nearestIndex = -1;
+                let minDistance = Infinity;
+
+                for (let i = 0; i < path.length; i++) {
+                    const distance = google.maps.geometry.spherical.computeDistanceBetween(
+                        new google.maps.LatLng(pos.lat, pos.lng),
+                        path[i]
+                    );
+                    if (distance < minDistance) {
+                        minDistance = distance;
+                        nearestIndex = i;
+                    }
+                }
+                if (minDistance < deviationThreshold) {
+                    console.log("User passed point, removing part of the route.");
+                    updatePolyline(pos, path.slice(nearestIndex + 1));  // Update to the remaining part of the route
+                }
+
+                // Если отклонение больше порога, пересчитаем маршрут
+                if (minDistance > deviationThreshold) {
+                    console.log("Пользователь отклонился от маршрута, пересчитываем...");
+                    calculateNewRoute(pos, selectedDestination);
+                }
+            }
+            
+            function updatePolyline(pos, remainingPath) {
+                if (!remainingPath || remainingPath.length === 0) return;
+                // Clear the old polyline
+                if (currentPolyline) {
+                    const currentPath = currentPolyline.getPath().getArray();
+                    if (JSON.stringify(currentPath) === JSON.stringify(remainingPath)) {
+                        return; // Skip if the path hasn't changed
+                    }
+                    currentPolyline.setMap(null);
+                }
+                currentPolyline = new google.maps.Polyline({
+                    path: remainingPath,
+                    strokeColor: '#0000FF',
+                    strokeOpacity: 1.0,
+                    strokeWeight: 5,
+                    map: map
+                });
+
+                // Draw the new polyline with the remaining part of the route
+                if (remainingPath && remainingPath.length > 0) {
+                    currentPolyline = new google.maps.Polyline({
+                        path: remainingPath,
+                        strokeColor: '#0000FF',
+                        strokeOpacity: 1.0,
+                        strokeWeight: 5,
+                        map: map
+                    });
+                }
+            }
+            let headingUpdateTimeout;
+                function updateHeading(newHeading) {
+                    if (headingUpdateTimeout) {
+                        clearTimeout(headingUpdateTimeout);
+                    }
+                    headingUpdateTimeout = setTimeout(() => {
+                        map.setHeading(newHeading);
+                    }, 100); // Update every 100ms
+                }
+
+            let isHeadingUpdating = false;
+            function updateUserMarker(position, heading) {
+                if (userMarker) {
+                    if (isHeadingUpdating) return;
+                    console.log("Updating user marker position: ", position);
+                    isHeadingUpdating = true;
+                    let headingDiff = heading - smoothHeading;
+                    if (headingDiff > 180) headingDiff -= 360;
+                    if (headingDiff < -180) headingDiff += 360;
+
+                    smoothHeading += headingDiff * 0.1;
+                    userMarker.setPosition(position);
+                    userMarker.setIcon(createArrowIcon(smoothHeading));
+                } else {
+                    console.error("User marker was expected but not found.");
+                }
+                isHeadingUpdating = false;
+            }
+
+            function rotateCameraSmoothly(currentHeading, targetHeading) {
+                if (Math.abs(targetHeading - currentHeading) < 1) {
+                    map.setHeading(targetHeading);
+                    return; // Stop further updates if the heading is close enough
+                }
+                // Calculate the shortest path between angles
+                let headingDiff = targetHeading - currentHeading;
+
+                if (headingDiff > 180) headingDiff -= 360;
+                if (headingDiff < -180) headingDiff += 360;
+
+                // Apply a smoothing factor (e.g., 0.1) to gradually rotate
+                smoothHeading = currentHeading + headingDiff * 0.1;
+
+                // Update the map heading and arrow rotation
+                
+                userMarker.setIcon(createArrowIcon(smoothHeading));
+
+                // Stop recursion if the heading is close enough to the target
+                if (Math.abs(headingDiff) < 1) return;  // Stop when the difference is small enough
+
+                // Request another animation frame for a smooth transition
+                requestAnimationFrame(() => rotateCameraSmoothly(smoothHeading, targetHeading));
+            }
+            function populateUserDropdown() {
+                const dropdown = document.getElementById('statisticsDropdown');
+                const usersRef = ref(db, 'users/');
+
+                // Fetch users from the database
+                onValue(usersRef, (snapshot) => {
+                    const users = snapshot.val();
+                    dropdown.innerHTML = '<option value="default">Select a User</option>'; // Reset options
+
+                    if (users) {
+                        Object.keys(users).forEach((userId) => {
+                            const option = document.createElement('option');
+                            option.value = userId;
+                            option.textContent = users[userId].email || userId; // Use email if available
+                            dropdown.appendChild(option);
+                        });
+                    }
+                });
+            }
+
+            function displayStatistics(userId) {
+            // Get references to elements
+                const statsDisplay = document.getElementById('statsDisplay');
+                const completedMarkersList = document.getElementById('completedMarkersList');
+                const skippedMarkersList = document.getElementById('skippedMarkersList');
+
+                // Check if the elements exist
+                if (!completedMarkersList) {
+                console.error('CompletedMarkersList is missing.');
+                return;
+                }
+
+                if (!skippedMarkersList) {
+                    console.error('skippedMarkersList is missing.');
+                    return;
+                }
+                
+                if (!statsDisplay) {
+                    console.error('statsDisplay is missing.');
+                    return;
+                }
+
+                // Clear the existing content
+                completedMarkersList.innerHTML = ''; 
+                skippedMarkersList.innerHTML = '';
+
+                // Define database references
+                const usersRef = ref(db, 'users/');
+                const completedMarkersRef = ref(db, `users/${userId}/completedMarkers/`);
+                const skippedMarkersRef = ref(db, `completedMarkers/`);
+
+                // Fetch marker data from Firebase
+                // Combined listener for both completed and skipped markers
+                onValue(completedMarkersRef, (completedSnapshot) => {
+                    onValue(skippedMarkersRef, (skippedSnapshot) => {
+                        let completedMarkers = '';
+                        let skippedMarkers = '';
+
+                        // Process completed markers
+                        if (completedSnapshot.exists()) {
+                            const completedData = completedSnapshot.val();
+                            Object.entries(completedData).forEach(([markerId, markerInfo]) => {
+                                if (markerInfo.userId === userId && markerInfo.status === 'completed') {
+                                    completedMarkers += `<li>Marker ${markerId} - Completed at: ${markerInfo.completedAt}</li>`;
+                                }
+                            });
+                        }
+
+                        // Process skipped markers
+                        if (skippedSnapshot.exists()) {
+                            const skippedData = skippedSnapshot.val();
+                            Object.entries(skippedData).forEach(([markerId, markerInfo]) => {
+                                if (markerInfo.userId === userId && markerInfo.status === 'skipped') {
+                                    skippedMarkers += `<li>Marker ${markerId} - Skipped</li>`;
+                                }
+                            });
+                        }
+
+                        // Update UI
+                        completedMarkersList.innerHTML = completedMarkers || '<li>None</li>';
+                        skippedMarkersList.innerHTML = skippedMarkers || '<li>None</li>';
+                    }, (error) => {
+                        console.error('Error fetching skipped markers:', error);
+                    });
+                }, (error) => {
+                    console.error('Error fetching completed markers:', error);
+                });
+            }
+
+            document.getElementById('statisticsDropdown').addEventListener('change', (event) => {
+                const selectedUserId = event.target.value;
+                if (selectedUserId !== 'default') {
+                    displayStatistics(selectedUserId);
+                }
+            });
+
+            // Call this when the admin panel is displayed
+            populateUserDropdown();
+
+            function calculateNewRoute(origin, destination) {
+                // Pobierz wszystkie markery z bazy i sprawdź ich status
+                const fetchMarkersAndCalculateRoute = async () => {
+                    const activeWaypoints = [];
+                    
+                    // Sprawdź każdy marker
+                    for (let i = 0; i < addressMarkers.length; i++) {
+                        const markerRef = ref(db, `users/${userId}/completedMarkers/${i}`);
+                        const snapshot = await get(markerRef);
+                        
+                        // Jeśli marker nie jest completed, dodaj go do trasy
+                        if (!snapshot.exists() || snapshot.val().status !== 'completed') {
+                            activeWaypoints.push({
+                                location: addressMarkers[i],
+                                stopover: true
+                            });
+                        }
+                    }
+
+                    // Jeśli nie ma żadnych aktywnych punktów, zakończ
+                    if (activeWaypoints.length === 0) {
+                        alert("Wszystkie punkty zostały wykonane!");
+                        return;
+                    }
+
+                    // Ostatni punkt jako cel
+                    const finalDestination = activeWaypoints.pop().location;
+                    
+                    // Oblicz trasę
+                    directionsService.route({
+                        origin: origin,
+                        destination: finalDestination,
+                        waypoints: activeWaypoints,
+                        optimizeWaypoints: true,
+                        travelMode: google.maps.TravelMode.DRIVING,
+                        language: 'pl'
+                    }, function(response, status) {
+                        if (status === google.maps.DirectionsStatus.OK) {
+                            directionsRenderer.setDirections(response);
+                            currentRoute = response;
+                            console.log('Trasa przeliczona z pominięciem wykonanych punktów');
+                        } else {
+                            console.error('Błąd podczas obliczania trasy: ' + status);
+                        }
+                    });
+                };
+
+                // Wywołaj funkcję
+                fetchMarkersAndCalculateRoute().catch(error => {
+                    console.error("Błąd podczas pobierania danych markerów:", error);
+                });
+            }
+
+            function rotateMap(heading) {
+                map.setHeading(heading);  // Rotate the map based on the heading
+            }
+            function panCameraAhead(position) {
+                map.setCenter(position); // Оставляем центрирование на пользователя
+            }
+            document.getElementById('recentreMapBtn').addEventListener('click', function() {
+                // Center the map on the user's current location
+                if (userLatLng) {
+                    isManualZoom = true;
+                    map.setCenter(userLatLng); 
+                    map.setZoom(17); // Recenter the map to user's current location
+                }
+                autoCenterMap = false;
+                autoZoom = false;
+                document.getElementById('recentreMapBtn').innerText = 'Recentrar';
+            });
+
+            function handleLocationError(error) {
+                switch (error.code) {
+                    case error.PERMISSION_DENIED:
+                        alert("Location access denied. Please allow location access to use this feature.");
+                        break;
+                    case error.POSITION_UNAVAILABLE:
+                        alert("Location information is unavailable.");
+                        break;
+                    case error.TIMEOUT:
+                        alert("Location request timed out.");
+                        break;
+                    default:
+                        alert("An unknown error occurred.");
+                }
+                console.error('Location error: ', error.message);
+            }
+
+
+            function initializeUserMarker() {
+            if (navigator.geolocation) {
+                if (geoWatchId !== null) {
+                    console.warn("Geolocation watcher already initialized.");
+                    return;
+                }
+                console.log('Creating userMarker for the first time');
+                navigator.geolocation.getCurrentPosition(function(position) {
+                    const pos = {
+                        lat: position.coords.latitude,
+                        lng: position.coords.longitude
+                    };
+
+                    userLatLng = pos;
+                    if (!userId) {
+                        console.warn("userId is not initialized yet.");
+                        return;  // Exit the function if userId is not set
+                    }
+
+                    if (!userMarker) {
+                        userMarker = new google.maps.Marker({
+                            position: pos,
+                            map: map,
+                            title: "Your location",
+                            icon: {
+                                url: "https://img.icons8.com/?size=100&id=EpAkgVzCZCVV&format=png&color=000000",                                }
+                        });
+
+                        
+                    } else {
+                        console.log('Updating existing userMarker position');
+                        userMarker.setPosition(pos);
+                    }
+                    if(followingUser && autoCenterMap){
+                        map.setCenter(pos);
+                    }
+                }, handleLocationError ,{
+                    enableHighAccuracy: true,
+                    timeout: 15000,
+                    maximumAge: 0
+                });
+                let positionUpdateTimeout;
+                
+                navigator.geolocation.watchPosition(function(position) {
+                    clearTimeout(positionUpdateTimeout);
+                    console.log("Heading: ", position.coords.heading);
+                    const pos = {
+                        lat: position.coords.latitude,
+                        lng: position.coords.longitude,
+                        speed: position.coords.speed || 0
+                    };
+                    
+                    userLatLng = pos;
+                    if (userMarker) {
+                        updateUserMarker(pos, position.coords.heading);
+                    } else {
+                        userMarker = new google.maps.Marker({
+                            position: pos,
+                            map: map,
+                            title: "Your location",
+                            icon: {
+                                url: "https://img.icons8.com/?size=100&id=EpAkgVzCZCVV&format=png&color=000000",
+                                scaledSize: new google.maps.Size(40, 40)
+                            }
+                        });
+                    }
+                    if (autoCenterMap) {
+                        map.setCenter(pos);
+                    }
+                    
+                    let heading = position.coords.heading;
+                    let nextPoint;
+
+                    if (currentRoute && currentRoute.routes[0] && currentRoute.routes[0].legs[0].steps) {
+                        nextPoint = currentRoute.routes[0].legs[0].steps[0].end_location;
+                    } else {
+                        // Fallback if nextPoint isn't available
+                        nextPoint = { lat: pos.lat, lng: pos.lng }; // Could set it to the same position to avoid the error
+                    }
+
+                    if (heading === null || heading === undefined) {
+                        heading = google.maps.geometry.spherical.computeHeading(
+                            new google.maps.LatLng(pos.lat, pos.lng),
+                            new google.maps.LatLng(nextPoint.lat, nextPoint.lng)
+                        );
+                    }
+                    previousHeading = heading;
+                    rotateCameraSmoothly(smoothHeading, heading);
+                    updateUserMarker(pos, heading);
+                    
+                    if (!userId) {
+                        console.warn("userId is not initialized yet.");
+                        return;  // Exit the function if userId is not set
+                    }
+                    //if (selectedDestination && currentRoute) {
+                        //recalculateRouteIfNeeded(pos);
+                    //}
+
+                    if (autoCenterMap) {
+                        map.setCenter(pos);
+                        rotateCameraSmoothly(smoothHeading, heading);  // Only center the map if the user has chosen to
+                    }
+
+                    if (!initialCentered) {
+                        map.setCenter(pos);
+                        initialCentered = true;
+                    }
+
+                    if (followingUser && autoCenterMap) {
+                        map.setCenter(pos);
+                    }
+
+                    let lastZoomUpdateTime = 0;
+
+                    if (Date.now() - lastZoomUpdateTime > 5000) {
+                        if (followingUser && autoZoom) {
+
+                            if (position.coords.speed > 20) {
+                                map.setZoom(14);  // Большая скорость - меньше увеличение
+                            } else if (position.coords.speed > 10) {
+                                map.setZoom(16);  // Средняя скорость
+                            } else {
+                                map.setZoom(18);  // Медленная скорость - большее увеличение
+                            }
+                            lastZoomUpdateTime = Date.now();
+                        }
+                    }
+
+                    if (directionsRenderer.getDirections()) {
+                        const route = directionsRenderer.getDirections().routes[0];
+                        const leg = route.legs[0];
+                        const path = leg.steps.map(step => step.end_location);
+                        updatedPolyline(pos, path);
+
+                        let nearestIndex = -1;
+                        let minDistance = Infinity;
+                        updateNextTurn(nextInstruction, nextDistance, nextTime, "left");
+
+                        for (let i = 0; i < path.length; i++) {
+                            const distance = google.maps.geometry.spherical.computeDistanceBetween(
+                                pos,
+                                path[i]
+                            );
+                            if (distance < minDistance) {
+                                minDistance = distance;
+                                nearestIndex = i;
+                            }
+                            console.log("Nearest index: ", nearestIndex, "Minimum Distance: ", minDistance);
+                        }
+
+                        if (nearestIndex >= 0) {
+                            const newPath = path.slice(nearestIndex + 1);  
+                            if (currentPolyline) {
+                                currentPolyline.setMap(null);  // Remove old polyline from the map
+                                currentPolyline = null;
+                            }
+                            if (newPath.length > 0) {
+
+                            currentPolyline = new google.maps.Polyline({
+                                path: newPath,
+                                strokeColor: '#0000FF',
+                                strokeOpacity: 1.0,
+                                strokeWeight: 5,
+                                map: map
+                            });
+                        }  
+                            map.setCenter(pos);
+                        }
+                        
+                        if (nearestIndex >= 0 && nearestIndex < path.length - 1) {
+                            const nextPoint = path[nearestIndex + 1];
+                            if (nextPoint) {
+                                const heading = google.maps.geometry.spherical.computeHeading(
+                                    new google.maps.LatLng(pos.lat, pos.lng),
+                                    nextPoint,
+                                    path[nearestIndex],
+                                    path[nearestIndex + 1]
+                                );
+                            }
+                            updateUserMarker(pos, heading);
+                            map.setHeading(heading);
+                        } else {
+                            map.setHeading(mapHeading);
+                        }
+                    } else {
+                        map.setHeading(mapHeading);
+                    }
+
+                    saveUserLocation(userId, pos);
+                    displayAllUsersLocations(); 
+                }, function(error) {
+                    console.error("Ошибка получения местоположения: " + error.message);
+                }, {
+                    enableHighAccuracy: true,
+                    maximumAge: 4000,
+                    timeout: 15000
+                });
+            } else {
+                console.error("Erro: Seu navegador не поддерживает геолокацию.");
+            }
+            }
+
+
+            function initMap() {
+                map = new google.maps.Map(document.getElementById('map'), {
+                    zoom: 17,
+                    center: { lat: 53.4285, lng: 14.5528 },
+                    mapTypeControl: false,
+                    streetViewControl: false,
+                    fullscreenControl: false,
+                    mapTypeId: 'hybrid',
+                    tilt: 45,
+                    heading: 0
+                });
+                const trafficLayer = new google.maps.TrafficLayer();
+                trafficLayer.setMap(map);
+
+
+                directionsRenderer = new google.maps.DirectionsRenderer({
+                    map: map,
+                    suppressMarkers: true,
+                    polylineOptions: {
+                        strokeColor: '#0000FF',
+                        strokeOpacity: 1.0,
+                        strokeWeight: 5
+                    }
+                });
+
+                directionsService = new google.maps.DirectionsService();
+                google.maps.event.addListenerOnce(map, 'idle', function() {
+                    console.log("Map fully loaded, now initializing user marker...");
+                    initializeUserMarker();
+                });
+
+            }
+
+            document.getElementById('createAdminBtn').addEventListener('click', async () => {
+                const email = prompt('Enter the new admin\'s email:');
+                const password = prompt('Enter the new admin\'s password:');
+
+                if (!email || !password) {
+                    alert('Email and password are required to create a new admin.');
+                    return;
+                }
+
+            
+                try {
+                    const currentUserId = auth.currentUser.uid;
+                    const userRef = ref(db, `users/${currentUserId}`);
+
+                    const snapshot = await get(userRef);
+                    const userData = snapshot.val();
+
+                    if (!userData || userData.role !== 'admin') {
+                        alert('Only admins can create new admins.');
+                        return;
+                    }
+
+                    // Check if email is already in use
+                    const signInMethods = await fetchSignInMethodsForEmail(auth, email);
+                    if (signInMethods.length > 0) {
+                        alert('This email is already in use. Please use a different email.');
+                        return;
+                    }
+
+
+                    // Create the new admin
+                    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+                    const newAdminId = userCredential.user.uid;
+
+                    // Set the role as admin in the database
+                    await set(ref(db, `users/${newAdminId}`), {
+                        email: email,
+                        role: 'admin'
+                    });
+
+                    alert('Admin created successfully!');
+                } catch (error) {
+                    console.error('Error creating admin:', error);
+                    alert(`Failed to create admin: ${error.message}`);
+                }
+            });
+
+
+            function rotateMapSmoothly(currentPosition, nextPosition) {
+                    // Compute the heading between current position and next step
+                    const newHeading = google.maps.geometry.spherical.computeHeading(
+                    new google.maps.LatLng(currentPosition.lat, currentPosition.lng),
+                    new google.maps.LatLng(nextPosition.lat, nextPosition.lng)
+                );
+
+                    // Set the map heading based on the computed direction
+                    let headingDifference = newHeading - previousHeading;
+
+                    if(headingDifference > 180){
+                        headingDifference -= 360;
+                    } else if(headingDifference <-180){
+                        headingDifference +=360;
+                    }
+                    const smoothHeading = previousHeading + headingDifference * 0.1;
+                    map.setHeading(smoothHeading);
+                    previousHeading = smoothHeading;
+                    requestAnimationFrame(() => rotateCameraSmoothly(currentPosition, nextPosition));
+                }
+
+            function saveUserLocation(userId, location) {
+                set(ref(db, 'users/' + userId + '/location'), location)
+                    .then(() => {
+                        console.log("Location saved successfully.");
+                    })
+                    .catch((error) => {
+                        console.error("Error saving location:", error);
+                    });
+            }
+            function initializeAdminPanel() {
+                if (!adminPanelInitialized) {
+                    document.getElementById('createAdminBtn').addEventListener('click', createAdminHandler);
+                    document.getElementById('statisticsDropdown').addEventListener('change', handleDropdownChange);
+                    adminPanelInitialized = true;
+                }
+            }
+
+            let adminPanelInitialized = false; // Add this variable globally
+
+
+            function markNearbyPoints() {
+
+                const notDoneMarkersRef = ref(db, 'notDoneMarkers/');
+    
+                onValue(notDoneMarkersRef, (snapshot) => {
+                    const notDoneMarkers = snapshot.val();
+                    
+                    if (notDoneMarkers) {
+                        // Add all "not done" points to the completedMarkers set
+                        Object.keys(notDoneMarkers).forEach(index => {
+                            completedMarkers.add(parseInt(index));  // Mark as "done" so they are skipped
+                        });
+                    }
+                markers.forEach(marker => marker.setMap(null));
+                markers = [];
+
+                const radius = 30000;
+                const infoWindow = new google.maps.InfoWindow();
+
+                addressMarkers.forEach((location, index) => {
+                    // Pobierz status markera z Firebase
+                    const markerRef = ref(db, `users/${userId}/completedMarkers/${index}`);
+                    
+                    get(markerRef).then((snapshot) => {
+                        if (snapshot.exists()) {
+                            const markerData = snapshot.val();
+                            // Jeśli marker ma status completed, pomijamy jego tworzenie
+                            if (markerData.status === 'completed') {
+                                return;
+                            }
+                        }
+                        
+                        // Jeśli marker nie jest completed, tworzymy go
+                        const markerColor = google.maps.geometry.spherical.computeDistanceBetween(
+                            new google.maps.LatLng(userLatLng.lat, userLatLng.lng),
+                            new google.maps.LatLng(location.lat, location.lng)
+                        ) <= radius 
+                            ? 'https://maps.google.com/mapfiles/ms/icons/green-dot.png'
+                            : 'https://maps.google.com/mapfiles/ms/icons/blue-dot.png';
+
+                        const marker = new google.maps.Marker({
+                            position: location,
+                            map: map,
+                            title: `Point ${index + 1}`,
+                            icon: {
+                                url: markerColor,
+                                scaledSize: new google.maps.Size(40, 40)
+                            }
+                        });
+
+                        markers.push(marker);
+
+                        // Dodaj listener kliknięcia tylko dla niekompletnych markerów
+                        marker.addListener('click', function() {
+                            if (selectedMarker) {
+                                selectedMarker.setMap(null);
+                            }
+
+                            selectedDestination = location;
+                            selectedMarker = marker;
+
+                            marker.setIcon({
+                                url: 'https://maps.google.com/mapfiles/ms/icons/green-dot.png',
+                                scaledSize: new google.maps.Size(40, 40)
+                            });
+                            if (currentPolyline) {
+                                currentPolyline.setMap(null);
+                                currentPolyline = null;
+                            }
+
+                            // Remove existing info window content if needed
+                            infoWindow.close();
+
+                            directionsService.route({
+                                origin: userLatLng,
+                                destination: location,
+                                travelMode: google.maps.TravelMode.DRIVING
+                            }, function(response, status) {
+                                if (status === 'OK') {
+                                    const route = response.routes[0].legs[0];
+                                    const contentString = `
+                                        <div>
+                                            <strong>Adress:</strong> ${route.end_address}<br>
+                                            <strong>Distance:</strong> ${route.distance.text}<br>
+                                            <strong>Estimated time:</strong> ${route.duration.text}<br>
+                                            <button id="markAsCompletedBtn">Mark as completed</button>
+                                            <button id="notDoneBtn">Not completed</button>
+                                        </div>
+                                    `;
+                                    infoWindow.setContent(contentString);
+                                    infoWindow.open(map, marker);
+                                    google.maps.event.clearInstanceListeners(infoWindow);
+
+                                    infoWindow.addListener('domready', function() {
+                                        const markAsCompletedBtn = document.getElementById('markAsCompletedBtn');
+                                        const notDoneBtn = document.getElementById('notDoneBtn');
+                                        if (markAsCompletedBtn) {
+                                            markAsCompletedBtn.addEventListener('click', function() {
+                                                //handleMarkerCompletion(index, marker, infoWindow);
+                                                const timestamp = new Date().toISOString(); 
+                                                marker.setIcon({
+                                                    url: 'https://cdn-icons-png.flaticon.com/512/684/684908.png',
+                                                    scaledSize: new google.maps.Size(40, 40)
+                                                });
+                                                completedMarkers.add(index);
+
+                                                set(ref(db, `users/${userId}/completedMarkers/${index}`), {
+                                                    userId: userId,
+                                                    status: 'completed',
+                                                    completedAt: timestamp,
+                                                }).then(() => {
+                                                    infoWindow.close();
+                                                    displayAllUsersLocations();
+                                                    const remainingWaypoints = addressMarkers
+                                                        .filter((_, i) => !completedMarkers.has(i))
+                                                        .map((location) => ({ location, stopover: true }));
+
+                                                    if (remainingWaypoints.length > 0) {
+                                                        const destination = remainingWaypoints.pop().location;
+                                                        calculateNewRoute(userLatLng, destination);
+                                                    } else {
+                                                        // If no waypoints are left, clear the route
+                                                        directionsRenderer.setDirections({ routes: [] });
+                                                    }
+                                                }).catch((error) => {
+                                                    console.error("Ошибка при обновлении маркера в Firebase:", error);
+                                                });
+                                            });
+                                        }
+                                        
+                                        if (notDoneBtn) {
+                                            notDoneBtn.addEventListener('click', function() {
+                                                handleMarkerNotDone(index, infoWindow);
+                                                // Mark the point as "not done" and move on to the next one
+                                                console.log(`Ponto ${index} marcado como "não concluído".`);
+                                                
+                                                set(ref(db, 'completedMarkers/' + index), {
+                                                    userId: userId,
+                                                    status: 'skipped' // Update status to "skipped"
+                                                }).then(() => {
+                                                    completedMarkers.add(index); // Mark it as done so it's not recalculated
+                                                    selectedDestination = null;
+                                                    calculateNewRoute(userLatLng, selectedDestination);
+                                                    console.log(`Ponto ${index} atualizado como "não concluído" no Firebase.`);
+                                                    infoWindow.close();  // Close the infoWindow
+                                                    displayAllUsersLocations();  // Optionally refresh the map
+                                                }).catch((error) => {
+                                                    console.error("Erro ao atualizar o marcador no Firebase:", error);
+        
+                                                });
+                                                // Optionally, disable the button after marking as not done
+                                                notDoneBtn.disabled = true;
+
+                                                infoWindow.close();
+                                                saveUserLocation(userId, userMarker.getPosition().toJSON());
+                                            });
+                                        }
+                                    });
+
+                                    startTripBtn.disabled = false;
+                                } else {
+                                    console.error('Erro ao calcular a rota: ' + status);
+                                }
+                            });
+
+                            saveUserLocation(userId, userMarker.getPosition().toJSON());
+                        });
+                    }).catch((error) => {
+                        console.error("Błąd podczas pobierania statusu markera:", error);
+                    });
+                });
+            });
+        }
+
+            function displayAllUsersLocations() {
+                const usersRef = ref(db, 'users/');
+                const completedMarkersRef = ref(db, `users/${userId}/completedMarkers/`);
+
+                onValue(completedMarkersRef, (snapshot) => {
+                    if (snapshot.exists()) {
+                        const markersData = snapshot.val();
+                        console.log('Markers Data:', markersData);
+
+                        let completedMarkers = '';
+                        let skippedMarkers = '';
+
+                        Object.entries(markersData).forEach(([markerId, markerInfo]) => {
+                            if (markerInfo.userId === userId) {
+                                if (markerInfo.status === 'completed') {
+                                    completedMarkers += `<li>Marker ${markerId} - Completed at: ${markerInfo.completedAt}</li>`;
+                                } else if (markerInfo.status === 'skipped') {
+                                    skippedMarkers += `<li>Marker ${markerId} - Skipped</li>`;
+                                }
+                            }
+                        });
+
+                        completedMarkersList.innerHTML = completedMarkers || '<li>None</li>';
+                        skippedMarkersList.innerHTML = skippedMarkers || '<li>None</li>';
+                    } else {
+                        console.warn('No marker data found.');
+                        completedMarkersList.innerHTML = '<li>None</li>';
+                        skippedMarkersList.innerHTML = '<li>None</li>';
+                    }
+                
+
+                    onValue(usersRef, (snapshot) => {
+                        const users = snapshot.val();
+                        if (users) {
+                            Object.keys(users).forEach(userId => {
+                                const user = users[userId];
+                                if (user.location) {
+                                    const userLatLng = new google.maps.LatLng(user.location.lat, user.location.lng);
+                                    if (userId === auth.currentUser.uid) {
+                                        return; 
+                                    }
+                                    if (userMarkers[userId]) {
+                                        userMarkers[userId].setPosition(userLatLng);
+                                    } else {
+                                        const newUserMarker = new google.maps.Marker({
+                                            position: userLatLng,
+                                            map: map,
+                                            title: `Usuário ${userId}`,
+                                            icon: {
+                                                url: "https://maps.google.com/mapfiles/ms/icons/yellow-dot.png",
+                                                scaledSize: new google.maps.Size(40, 40)
+                                            }
+                                        });
+                                        userMarkers[userId] = newUserMarker;
+                                    }
+                                }
+                            });
+                        }
+
+                        markNearbyPoints();
+                    });
+                });
+            }
+            
+            // Function to calculate the closest points and sort them
+            function calculateClosestRoute() {
+                let waypoints = [];
+                let remainingMarkers = [...addressMarkers];
+                let currentLocation = userLatLng;
+
+                remainingMarkers.sort((a, b) =>{
+                    const distA = google.maps.geometry.spherical.computeDistanceBetween(
+                        new google.maps.LatLng(currentLocation.lat, currentLocation.lng),
+                        new google.maps.LatLng(a.lat, a.lng)
+                    );
+                    const distB = google.maps.geometry.spherical.computeDistanceBetween(
+                        new google.maps.LatLng(currentLocation.lat, currentLocation.lng),
+                        new google.maps.LatLng(b.lat, b.lng)
+                    );
+                    return distA - distB;
+                });
+
+                    for (let i = 0; i < remainingMarkers.length - 1; i++){
+                        waypoints.push({
+                            location: remainingMarkers[i],
+                            stopover: true
+                        });
+                    }
+                    return {waypoints: waypoints, destination: remainingMarkers[remainingMarkers.length - 1]};
+
+            }
+            function panCameraAhead(position, distanceAhead = 0.0002) {
+                // Increase the latitude slightly to pan the camera upwards
+                const offsetPosition = {
+                lat: position.lat + distanceAhead,  // Increase latitude by a small value
+                lng: position.lng
+            };
+
+                // Set the map center to the new offset position
+                map.setCenter(offsetPosition);
+            }
+            function calculateRemainingDistanceAndTime(currentPosition){
+                if(!directionsRenderer.getDirections()){
+                    console.log("No direction available yet");
+                    return;
+                }
+                const directions = directionsRenderer.getDirections();
+                const route = directions.routes[0];
+
+                if(!route){
+                    console.log("Route not available");
+                    return;
+                }
+
+                console.log("Calculating remaining distance nad time...");
+                console.log("Current position: ", currentPosition);
+
+                let remainingDistance = 0;
+                let remainingTime = 0;
+
+                for(let i = 0; i < route.legs.length; i++){
+                    const leg = route.legs[i];
+                    console.log(`Leg ${i + 1}:`, leg);
+
+                    if(i === 0){
+                        remainingDistance += google.maps.geometry.spherical.computeDistanceBetween(
+                            new google.maps.LatLng(currentPosition.lat, currentPosition.lng),
+                            leg.end_location
+                        );
+                        remainingTime += leg.duration.value;
+                    } else{
+                        remainingDistance += leg.distance.value;
+                        remainingTime += leg.duration.value;
+                    }
+                }
+
+                const remainingDistanceKm = (remainingDistance / 1000).toFixed(2);
+                const remainingTimeMinutes = Math.ceil(remainingTime / 60);
+                console.log("Remaining Distance: ", remainingDistanceKm);
+                console.log("Remaining Time: ", remainingTimeMinutes);
+
+                document.getElementById('remainingDistance').innerText = remainingDistanceKm + "km";
+                document.getElementById('remainingTime').innerText = remainingTimeMinutes + "min";
+
+            }
+            
+
+            startTripBtn.addEventListener('click', async function() {
+                if (currentPolyline) {
+                    currentPolyline.setMap(null);
+                    currentPolyline = null;
+                }
+
+                if (userMarker) {
+                    userMarker.setMap(null);
+                    userMarker = null;
+                }
+
+                directionsRenderer.setDirections({routes: []});
+
+                // Pobierz aktywne punkty z Firebase
+                const activeWaypoints = [];
+                try {
+                    for (let i = 0; i < addressMarkers.length; i++) {
+                        const markerRef = ref(db, `users/${userId}/completedMarkers/${i}`);
+                        const snapshot = await get(markerRef);
+                        
+                        if (!snapshot.exists() || snapshot.val().status !== 'completed') {
+                            activeWaypoints.push({
+                                location: addressMarkers[i],
+                                stopover: true
+                            });
+                        }
+                    }
+                } catch (error) {
+                    console.error("Błąd podczas pobierania danych z Firebase:", error);
+                    return;
+                }
+
+                if (activeWaypoints.length === 0) {
+                    alert("Wszystkie punkty zostały wykonane!");
+                    return;
+                }
+
+                // Ustaw marker użytkownika
+                userMarker = new google.maps.Marker({
+                    position: userLatLng,
+                    map: map,
+                    title: "Twoja lokalizacja",
+                    icon: {
+                        url: "https://img.icons8.com/?size=100&id=EpAkgVzCZCVV&format=png&color=000000",
+                        scaledSize: new google.maps.Size(40, 40)
+                    }
+                });
+
+                document.getElementById('infoPanel').style.display = 'block';
+                document.getElementById('recentreMapBtn').style.display = 'block';
+
+                if (!userLatLng) {
+                    alert("Nie można określić lokalizacji użytkownika.");
+                    return;
+                }
+
+                followingUser = true;
+                autoCenterMap = true;
+                autoZoom = true;
+
+                const finalDestination = activeWaypoints.pop().location;
+                
+                // Oblicz trasę z aktywnymi punktami
+                directionsService.route({
+                    origin: userLatLng,
+                    destination: finalDestination,
+                    waypoints: activeWaypoints,
+                    optimizeWaypoints: true,
+                    travelMode: google.maps.TravelMode.DRIVING,
+                    language: 'pl'
+                }, function(response, status) {
+                    if (status === google.maps.DirectionsStatus.OK) {
+                        directionsRenderer.setDirections(response);
+                        startTripBtn.disabled = false;
+                        const route = response.routes[0];
+                        const leg = route.legs[0];
+                        const startLocation = leg.start_location;
+                        const endLocation = leg.steps[0].end_location;
+                        const initialHeading = google.maps.geometry.spherical.computeHeading(startLocation, endLocation);
+
+                        map.setHeading(initialHeading);
+                        map.setZoom(16);
+                    } else {
+                        console.error('Błąd podczas obliczania trasy: ' + status);
+                        alert("Błąd podczas obliczania trasy: " + status);
+                    }
+                });
+                if (userMarker) {
+                    console.log("Starting route and ensuring existing marker is updated.");
+                    // No new marker is created, only the position and icon should be updated
+                    updateUserMarker(userLatLng, previousHeading);
+                }
+
+                setTimeout(() => {
+                    animateZoom(map, 16, 19, 2000); 
+                    map.panTo(userLatLng); 
+                }, 5000);
+
+                document.getElementById('turnInstructions').style.display = 'block';
+
+
+                navigator.geolocation.watchPosition(function(position) {
+                    const pos = {
+                        lat: position.coords.latitude,
+                        lng: position.coords.longitude
+                    };
+                    const heading = position.coords.heading || 0;
+                    updateUserMarker(pos, heading);
+                    rotateMap(heading);
+                    map.setCenter(pos);
+
+                    console.log("Update user position: ", pos);
+                    if (followingUser && autoZoom && !isManualZoom) {
+                        // Adjust zoom level based on speed, but only the first time
+                        if (position.coords.speed > 20) {
+                            map.setZoom(14);  // Large speed - less zoom
+                        } else if (position.coords.speed > 10) {
+                            map.setZoom(16);  // Medium speed
+                        } else {
+                            map.setZoom(18);  // Slow speed - more zoom
+                        }
+                    }
+                    if (autoCenterMap) {
+                        map.setCenter(pos);
+                    }
+
+                    if (userMarker) {
+                        userMarker.setPosition(pos);
+                    }
+                    userLatLng = pos;
+                    if(directionsRenderer.getDirections()){
+                        panCameraAhead(pos);
+                        calculateRemainingDistanceAndTime(pos);
+                        const route = directionsRenderer.getDirections().routes[0];
+                        if(route && route.legs && route.legs.length > 0){
+                        const leg = route.legs[0];
+                        const path = leg.steps.map(step => step.end_location);
+                        const nextStep = leg.steps[0];
+                        const nextInstruction = nextStep.instructions;
+                        const nextDistance = nextStep.distance.text;
+                        const nextTime = nextStep.duration.text;
+                        updateNextTurn(nextInstruction, nextDistance, nextTime, "straight");
+                        document.getElementById('nextTurnText').innerHTML = instruction;
+                        document.getElementById('remainingDistanceNav').innerText = distance;
+                        document.getElementById('remainingTimeNav').innerText = time;
+                        document.getElementById('nextTurnIcon').className = "turn-icon";
+                        
+                        }
+                    } else {
+                        userMarker = new google.maps.Marker({
+                            position: pos,
+                            map: map,
+                            icon: {
+                                url: "https://maps.google.com/mapfiles/kml/shapes/arrow.png",
+                                scaledSize: new google.maps.Size(40, 40)
+                            }
+                        });
+                    }
+                
+                    
+                    
+
+                    if (directionsRenderer.getDirections()) {
+                        const route = directionsRenderer.getDirections().routes[0];
+                        const leg = route.legs[0];
+                        const path = leg.steps.map(step => step.end_location);
+
+                        let nearestIndex = -1;
+                        let minDistance = Infinity;
+
+                        for (let i = 0; i < path.length; i++) {
+                            const distance = google.maps.geometry.spherical.computeDistanceBetween(
+                                pos,
+                                path[i]
+                            );
+                            if (distance < minDistance) {
+                                minDistance = distance;
+                                nearestIndex = i;
+                            }
+                        }
+
+                        if (nearestIndex >= 0 && nearestIndex < path.length - 1) {
+                            
+                            const currentPosition = path[nearestIndex];
+                            const nextPosition = path[nearestIndex + 1];
+                            const newPath = path.slice(nearestIndex + 1);
+                            const remainingPath = steps.slice(nearestIndex + 1).map(step => step.end_location);
+                            updatePolyline(pos, remainingPath)
+                            const heading = google.maps.geometry.spherical.computeHeading(
+                                path[nearestIndex],
+                                path[nearestIndex + 1]
+                                
+                            );
+                            rotateMapSmoothly(currentPosition, nextPosition);
+                            
+                            const nextStep = leg.steps[nearestIndex];
+                            const nextInstruction = nextStep.instructions;
+                            const nextDistance = leg.distance.text;
+                            const nextTime = leg.duration.text;
+                            updateNextTurn(nextInstruction, nextDistance, nextTime, "straight");
+                        } else {
+                            map.setHeading(mapHeading);
+                        }
+                    } else {
+                        map.setHeading(mapHeading);
+                    }
+
+                    if (autoCenterMap) {
+                        map.setCenter(pos);
+                    }
+
+                    map.setZoom(18);
+
+
+                }, function(error) {
+                    switch (error.code) {
+                        case error.PERMISSION_DENIED:
+                            console.error("User denied the request for Geolocation.");
+                            break;
+                        case error.POSITION_UNAVAILABLE:
+                            console.error("Location information is unavailable.");
+                            break;
+                        case error.TIMEOUT:
+                            console.error("The request to get user location timed out.");
+                            break;
+                        default:
+                            console.error("An unknown error occurred.");
+                            break;
+                    }
+                
+                }, {
+                    enableHighAccuracy: true,
+                    maximumAge: 4000,
+                    timeout: 15000
+                });
+            });
+
+            function animateZoom(map, fromZoom, toZoom, duration) {
+                let start = null;
+                const step = (timestamp) => {
+                    if (!start) start = timestamp;
+                    const progress = timestamp - start;
+                    const zoom = fromZoom + (toZoom - fromZoom) * (progress / duration);
+                    map.setZoom(zoom);
+                    if (progress < duration) {
+                        window.requestAnimationFrame(step);
+                    } else {
+                        map.setZoom(toZoom);
+                    }
+                };
+                window.requestAnimationFrame(step);
+            }
+            function updateNextTurn(instruction, distance, time, turnType) {
+                const nextTurnText = document.getElementById('nextTurnText');
+                const remainingDistanceNav = document.getElementById('remainingDistanceNav');
+                const remainingTimeNav = document.getElementById('remainingTimeNav');
+                const nextTurnIcon = document.getElementById('nextTurnIcon');
+
+                if (!nextTurnText || !remainingDistanceNav || !remainingTimeNav || !nextTurnIcon) {
+                    console.error("Один из элементов интерфейса не найден");
+                    return;
+                }
+
+                nextTurnText.innerHTML = instruction;
+                remainingDistanceNav.innerText = distance;
+                remainingTimeNav.innerText = time;
+                
+                
+                if (turnType === 'left') {
+                    nextTurnIcon.src = 'https://cdn-icons-png.flaticon.com/512/724/724999.png'; // Left turn icon
+                } else if (turnType === 'right') {
+                    nextTurnIcon.src = 'https://cdn-icons-png.flaticon.com/512/725/725000.png'; // Right turn icon
+                } else {
+                    nextTurnIcon.src = 'https://static.thenounproject.com/png/802358-200.png';
+                }
+                nextTurnIcon.style.display = 'block'; // Ensure the arrow is visible
+
+            }
+        });
+    </script>
+    <style>
+        body {
+        font-family: Arial, sans-serif;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background-color: #f5f5f5;
+        min-height: 100vh;
+        }
+
+        .form-container {
+            background-color: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0px 4px 15px rgba(0, 0, 0, 0.2);
+            width: 400px;
+            overflow: hidden;
+            border: 1px solid #e6e6e6;
+        }
+
+        .form-container h2 {
+            margin-bottom: 20px;
+            color: #333333;
+            font-size: 1.5em;
+        }
+
+        input {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            font-size: 16px;
+        }
+
+        .custom-button {
+            padding: 15px;
+            margin: 10px auto;
+            background: linear-gradient(135deg, #6a11cb 0%, #2575fc 100%);
+            color: white;
+            border: none;
+            border-radius: 50px;
+            font-size: 18px;
+            font-weight: bold;
+            text-align: center;
+            cursor: pointer;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+            width: 100%;
+            transition: all 0.3s ease;
+        }
+
+        .custom-button:hover {
+            background: linear-gradient(135deg, #2575fc 0%, #6a11cb 100%);
+            transform: translateY(-5px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+        }
+
+        .custom-button:active {
+            transform: translateY(2px);
+            box-shadow: 0 3px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        button {
+            padding: 10px;
+            margin: 10px 0;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 18px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        #mapContainer {
+            display: none;
+            width: 100%;
+            height: 100vh;
+            position: relative;
+        }
+
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+
+        #startTripBtn {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: #28a745;
+            color: white;
+            border: none;
+            border-radius: 25px;
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1);
+            transition: background-color 0.3s ease;
+            z-index: 5;
+        }
+
+        #startTripBtn:hover {
+            background-color: #218838;
+        }
+
+        #startTripBtn:active {
+            background-color: #1e7e34;
+        }
+        #turnInstructions {
+            display: none; /* Hidden until route starts */
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            width: 80%;
+            transform: translateX(-50%);
+            background-color: #007bff; /* Blue background */
+            color: white;
+            padding: 15px;
+            font-size: 18px;
+            border-radius: 8px;
+            z-index: 1000;
+            text-align: center;
+        }
+        .turn-icon{
+            width: 40px;  /* Adjust the size of the arrow */
+            height: 40px;
+            margin-top: 5px;
+            display: block;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .left-turn{
+            background-image: url('https://cdn-icons-png.flaticon.com/512/724/724999.png');
+        }
+        .right-turn{
+            background-image: url('https://cdn-icons-png.flaticon.com/512/725/725000.png');
+        }
+        .straight{
+            background-image: url('https://static.thenounproject.com/png/802358-200.png');
+        }
+        #infoPanel {
+        display: none;
+        position: absolute;
+        bottom: 70px; /* Move to bottom */
+        left: 50%;   /* Align to the left */
+        transform: translateX(-50%);
+        background: white;
+        padding: 1px;
+        z-index: 5;
+        border-radius: 8px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        font-size: 8px; /* Fixed width */
+        text-align: center; /* Center text */
+        max-height: 50px; /* Limit height */
+        overflow: hidden;
+        }
+        #recentreMapBtn {
+        position: absolute;
+        bottom: 20px; /* Adjust depending on your layout */
+        right: 10%; /* This moves it closer to the "Iniciar Rota" button */
+        background-color: #007bff;
+        color: white;
+        padding: 10px 20px;
+        font-size: 16px;
+        border-radius: 5px;
+        z-index: 5; /* Ensure it stays above the map */
+        }
+        #createAdminBtn {
+        float: left;
+        margin-right: 20px; /* Add spacing between the button and dropdown */
+        }
+
+        #statisticsDropdown {
+            display: inline-block; /* Ensure the dropdown stays aligned */
+        }
+
+    </style>
+</head>
+<body>
+    <div id="adminPanel" style="display: none;">
+        <h3>Admin Panel</h3>
+        <button id="createAdminBtn">Create New Admin</button>
+    
+        <!-- Dropdown for statistics -->
+        <select id="statisticsDropdown">
+            <option value="default">Select a User</option>
+        </select>
+        <div id="statsDisplay">
+            <p><strong>Speed:</strong> <span id="userSpeed">N/A</span></p>
+            <p><strong>Completed Markers:</strong></p>
+            <ul id="completedMarkersList"></ul>
+            <p><strong>Skipped Markers:</strong></p>
+            <ul id="skippedMarkersList"></ul>
+        </div>
+        
+    </div>
+    
+    <form id="registerForm">
+        <h2>Register</h2>
+        <input type="email" id="registerEmail" placeholder="Email" required />
+        <input type="password" id="registerPassword" placeholder="Password" required />
+        <button type="submit">Register</button>    </form>
+
+    <form id="loginForm">
+        <h2>Login</h2>
+        <input type="email" id="loginEmail" placeholder="Email" required />
+        <input type="password" id="loginPassword" placeholder="Password" required />
+        <button type="submit">Enter</button>
+    </form>
+
+    <div id="mapContainer">
+        <div id="map"></div>
+        <div id="directions-panel" style="width: 100%; height: 200px; overflow: auto;"></div>
+        <button id="startTripBtn" disabled>Create route</button>
+        <button id="recentreMapBtn" style="display:none;">Recenter</button>
+    </div>
+    <div id="infoPanel">
+        <p><strong>Distante left:</strong> <span id="remainingDistance">Calculating...</span></p>
+        <p><strong>Time left:</strong> <span id="remainingTime">Calculating...</span></p>
+        <button id="markAsCompletedBtn">Mark as completed</button>
+        <button id="notDoneBtn">Not completed</button>
+
+    </div>
+    
+
+    <div id="turnInstructions">
+        <span id="nextTurnText">Instructions of navigation will apear here.</span><br>
+        <img id="nextTurnIcon" class="turn-icon" style="display: none;" alt="turn icon" /><br>
+        <span id="remainingDistanceNav"></span> - 
+        <span id="remainingTimeNav"></span>
+    </div>
+    <div id="nextTurn" style="position: absolute; top: 50px; left: 50px; padding: 10px; z-index: 5;"></div>
+    <div id="nextTurnText"></div>
+    <div id="remainingDistanceNav"></div>
+    <div id="remainingTimeNav"></div>
+    <div id="nextTurnIcon" class="turn-icon"></div>
+
+</body>
+</html>
