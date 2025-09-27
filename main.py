@@ -10,7 +10,7 @@ from flask import Flask, render_template
 app = Flask(__name__)
 
 # Google Maps API key
-api_key = 'AIzaSyAYCmOPWp58Y4Q_XdOUzE8CrYi_l59vtes'
+api_key = ''
 gmaps = googlemaps.Client(key=api_key)
 
 # Global variable to store address markers
